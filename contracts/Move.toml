@@ -1,0 +1,13 @@
+[package]
+name = "streamgift"
+version = "1.0.0"
+authors = []
+
+[addresses]
+streamgift = "0x9892aa20d7ba7b58dedf37f98f18557a3c62f1bf7cd950415a408c06a5e704f5"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/movementlabsxyz/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "main" }
+AptosStdlib = { git = "https://github.com/movementlabsxyz/aptos-core.git", subdir = "aptos-move/framework/aptos-stdlib", rev = "main" }
+
+[dev-dependencies]
