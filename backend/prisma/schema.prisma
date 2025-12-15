@@ -16,9 +16,6 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  sentStreams     Stream[] @relation("StreamSender")
-  receivedStreams Stream[] @relation("StreamRecipient")
-
   @@index([email])
   @@index([twitterHandle])
 }
@@ -37,25 +34,22 @@ model SocialMapping {
 }
 
 model Stream {
-  id                   String   @id @default(cuid())
-  onChainId            Int      @unique
-  senderAddress        String
-  recipientAddress     String
-  recipientSocialType  String?
+  id                    String   @id @default(cuid())
+  onChainId             Int      @default(0)
+  senderAddress         String
+  recipientAddress      String
+  recipientSocialType   String?
   recipientSocialHandle String?
-  recipientSocialHash  String?
-  totalAmount          String
-  claimedAmount        String   @default("0")
-  ratePerSecond        String
-  startTime            DateTime
-  endTime              DateTime
-  message              String?
-  status               String   @default("ACTIVE")
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-
-  sender    User? @relation("StreamSender", fields: [senderAddress], references: [walletAddress])
-  recipient User? @relation("StreamRecipient", fields: [recipientAddress], references: [walletAddress])
+  recipientSocialHash   String?
+  totalAmount           String
+  claimedAmount         String   @default("0")
+  ratePerSecond         String
+  startTime             DateTime
+  endTime               DateTime
+  message               String?
+  status                String   @default("ACTIVE")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@index([senderAddress])
   @@index([recipientAddress])

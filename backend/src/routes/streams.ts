@@ -18,12 +18,13 @@ const createStreamSchema = z.object({
   durationSeconds: z.number().positive(),
   startTime: z.number().optional(),
   message: z.string().optional(),
+  senderAddress: z.string(),
 });
 
 router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const body = createStreamSchema.parse(req.body);
-    const senderAddress = req.user!.walletAddress;
+    const senderAddress = body.senderAddress;
 
     if (!senderAddress) {
       res.status(400).json({ error: 'Sender wallet address not found' });
@@ -56,7 +57,11 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
           },
         });
 
-        await registerRecipient(socialHash, recipientAddress);
+        try {
+          await registerRecipient(socialHash, recipientAddress);
+        } catch (error) {
+          console.error('Failed to register recipient on-chain:', error);
+        }
       }
     }
 
@@ -151,6 +156,16 @@ router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res
           claimable = (accrued > remaining ? remaining : accrued).toString();
         }
       }
+    } else {
+      // Calculate claimable for streams not yet on-chain
+      const now = Math.floor(Date.now() / 1000);
+      const startTime = Math.floor(stream.startTime.getTime() / 1000);
+      if (now > startTime) {
+        const elapsed = now - startTime;
+        const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
+        const remaining = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
+        claimable = (accrued > remaining ? remaining : accrued).toString();
+      }
     }
 
     res.json({
@@ -179,8 +194,15 @@ router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res
 
 router.get('/user/outgoing', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const walletAddress = req.query.walletAddress as string;
+    
+    if (!walletAddress) {
+      res.status(400).json({ error: 'Wallet address required' });
+      return;
+    }
+
     const streams = await prisma.stream.findMany({
-      where: { senderAddress: req.user!.walletAddress },
+      where: { senderAddress: walletAddress },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -193,8 +215,15 @@ router.get('/user/outgoing', authMiddleware, async (req: AuthenticatedRequest, r
 
 router.get('/user/incoming', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const walletAddress = req.query.walletAddress as string;
+    
+    if (!walletAddress) {
+      res.status(400).json({ error: 'Wallet address required' });
+      return;
+    }
+
     const streams = await prisma.stream.findMany({
-      where: { recipientAddress: req.user!.walletAddress },
+      where: { recipientAddress: walletAddress },
       orderBy: { createdAt: 'desc' },
     });
 
