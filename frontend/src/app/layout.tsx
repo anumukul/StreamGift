@@ -1,11 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
-import dynamic from 'next/dynamic';
-const PrivyProvider = dynamic(
-  () => import('@/components/providers/PrivyProvider').then((mod) => mod.PrivyProvider),
-  { ssr: false }
-);
+import { PrivyProvider } from '@/components/providers/PrivyProvider';
 import { QueryProvider } from '@/components/providers/QueryProvider';
 import { Toaster } from 'sonner';
 
