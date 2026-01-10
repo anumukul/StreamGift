@@ -289,6 +289,49 @@ module streamgift::stream {
         });
     }
 
+    /// Admin cancel stream on behalf of sender (for custodial architecture)
+    public entry fun admin_cancel_stream(
+        admin: &signer,
+        contract_address: address,
+        stream_id: u64,
+        sender_address: address,
+    ) acquires StreamStore {
+        let admin_addr = signer::address_of(admin);
+
+        assert!(exists<StreamStore>(contract_address), error::not_found(E_NOT_INITIALIZED));
+
+        let store = borrow_global_mut<StreamStore>(contract_address);
+        assert!(store.admin == admin_addr, error::permission_denied(E_NOT_ADMIN));
+        assert!(table::contains(&store.streams, stream_id), error::not_found(E_STREAM_NOT_FOUND));
+
+        let stream = table::borrow_mut(&mut store.streams, stream_id);
+
+        assert!(stream.sender == sender_address, error::permission_denied(E_NOT_STREAM_SENDER));
+        assert!(stream.status == STATUS_ACTIVE, error::invalid_state(E_STREAM_ALREADY_CANCELLED));
+
+        let claimable = calculate_claimable_internal(stream);
+        let remaining = stream.total_amount - stream.claimed_amount - claimable;
+
+        stream.status = STATUS_CANCELLED;
+
+        if (claimable > 0) {
+            let recipient_payment = coin::extract(&mut store.escrow, claimable);
+            aptos_account::deposit_coins(stream.recipient, recipient_payment);
+        };
+
+        if (remaining > 0) {
+            let refund = coin::extract(&mut store.escrow, remaining);
+            aptos_account::deposit_coins(sender_address, refund);
+        };
+
+        event::emit_event(&mut store.stream_cancelled_events, StreamCancelledEvent {
+            stream_id,
+            sender: sender_address,
+            amount_refunded: remaining,
+            amount_to_recipient: claimable,
+        });
+    }
+
     // ============================================
     // USER FUNCTIONS
     // ============================================
@@ -305,7 +348,7 @@ module streamgift::stream {
         };
     }
 
-    /// Create a new stream
+    /// Create a new stream (original function - kept for backward compatibility)
     public entry fun create_stream(
         sender: &signer,
         contract_address: address,
@@ -317,7 +360,7 @@ module streamgift::stream {
         message: String,
     ) acquires StreamStore, UserStreamIndex {
         let sender_addr = signer::address_of(sender);
-        
+
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
         assert!(duration_seconds > 0, error::invalid_argument(E_INVALID_DURATION));
         assert!(exists<StreamStore>(contract_address), error::not_found(E_NOT_INITIALIZED));
@@ -334,7 +377,7 @@ module streamgift::stream {
 
         // Transfer tokens to escrow
         let payment = coin::withdraw<AptosCoin>(sender, amount);
-        
+
         let store = borrow_global_mut<StreamStore>(contract_address);
         coin::merge(&mut store.escrow, payment);
         store.fee_collected = store.fee_collected + fee;
@@ -379,9 +422,80 @@ module streamgift::stream {
                 incoming_stream_ids: vector::empty(),
             });
         };
-        
+
         let sender_index = borrow_global_mut<UserStreamIndex>(sender_addr);
         vector::push_back(&mut sender_index.outgoing_stream_ids, stream_id);
+    }
+
+    /// Create a new stream (admin creates on behalf of sender for custodial architecture)
+    public entry fun admin_create_stream(
+        admin: &signer,
+        contract_address: address,
+        sender_address: address,
+        recipient_address: address,
+        recipient_social_hash: vector<u8>,
+        amount: u64,
+        duration_seconds: u64,
+        start_time: u64,
+        message: String,
+    ) acquires StreamStore {
+        let admin_addr = signer::address_of(admin);
+
+        assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
+        assert!(duration_seconds > 0, error::invalid_argument(E_INVALID_DURATION));
+        assert!(exists<StreamStore>(contract_address), error::not_found(E_NOT_INITIALIZED));
+
+        // Verify admin
+        let store = borrow_global_mut<StreamStore>(contract_address);
+        assert!(store.admin == admin_addr, error::permission_denied(E_NOT_ADMIN));
+
+        // Calculate fee and stream amount
+        let fee = (amount * PROTOCOL_FEE_BPS) / BPS_DENOMINATOR;
+        let stream_amount = amount - fee;
+        let rate_per_second = stream_amount / duration_seconds;
+
+        // Calculate times
+        let current_time = timestamp::now_seconds();
+        let actual_start_time = if (start_time == 0) { current_time } else { start_time };
+        let end_time = actual_start_time + duration_seconds;
+
+        // Transfer tokens from admin to escrow (admin pre-funded by user)
+        let payment = coin::withdraw<AptosCoin>(admin, amount);
+        coin::merge(&mut store.escrow, payment);
+        store.fee_collected = store.fee_collected + fee;
+
+        // Create stream with original sender address (not admin)
+        let stream_id = store.next_stream_id;
+        store.next_stream_id = stream_id + 1;
+
+        let stream = Stream {
+            id: stream_id,
+            sender: sender_address,
+            recipient: recipient_address,
+            recipient_social_hash,
+            total_amount: stream_amount,
+            claimed_amount: 0,
+            rate_per_second,
+            start_time: actual_start_time,
+            end_time,
+            last_claim_time: actual_start_time,
+            message,
+            status: STATUS_ACTIVE,
+            created_at: current_time,
+        };
+
+        table::add(&mut store.streams, stream_id, stream);
+
+        // Emit event
+        event::emit_event(&mut store.stream_created_events, StreamCreatedEvent {
+            stream_id,
+            sender: sender_address,
+            recipient: recipient_address,
+            recipient_social_hash: copy recipient_social_hash,
+            total_amount: stream_amount,
+            duration: duration_seconds,
+            start_time: actual_start_time,
+        });
     }
 
     /// Claim from a stream

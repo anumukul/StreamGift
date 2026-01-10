@@ -146,6 +146,18 @@ export const api = {
         }>;
       }>('/api/streams/user/incoming', { token, params });
     },
+
+    // Cancel a stream
+    cancel: (streamId: string, data: { walletAddress: string }, token: string) =>
+      request<{
+        success: boolean;
+        refundedAmount: string;
+        recipientAmount: string;
+        transaction: {
+          hash: string;
+          explorerUrl: string;
+        };
+      }>(`/api/streams/${streamId}/cancel`, { method: 'POST', body: data, token }),
   },
 
   claim: {

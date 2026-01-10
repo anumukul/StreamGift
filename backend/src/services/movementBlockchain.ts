@@ -53,6 +53,7 @@ export async function createStreamOnChain(params: {
   signature?: string;
 }): Promise<{ hash: string; streamId: number }> {
   const {
+    senderAddress,
     recipientAddress,
     socialHash,
     amount,
@@ -61,14 +62,15 @@ export async function createStreamOnChain(params: {
     message,
   } = params;
 
-  const socialHashBytes = typeof socialHash === 'string' 
+  const socialHashBytes = typeof socialHash === 'string'
     ? Array.from(hashToBytes(socialHash))
     : Array.from(socialHash);
 
   const payload: InputEntryFunctionData = {
-    function: `${env.CONTRACT_ADDRESS}::stream::create_stream`,
+    function: `${env.CONTRACT_ADDRESS}::stream::admin_create_stream`,
     functionArguments: [
       env.CONTRACT_ADDRESS,
+      normalizeAddress(senderAddress),
       normalizeAddress(recipientAddress),
       socialHashBytes,
       amount,
@@ -99,10 +101,16 @@ export async function createStreamOnChain(params: {
   return { hash: committedTxn.hash, streamId: streamCount };
 }
 
-export async function cancelStreamOnChain(streamId: number): Promise<string> {
+export async function cancelStreamOnChain(
+  streamId: number,
+  senderAddress: string
+): Promise<{ hash: string }> {
+  const normalizedSender = normalizeAddress(senderAddress);
+  console.log(`Admin cancelling stream ${streamId} for sender ${normalizedSender}`);
+
   const payload: InputEntryFunctionData = {
-    function: `${env.CONTRACT_ADDRESS}::stream::cancel_stream`,
-    functionArguments: [env.CONTRACT_ADDRESS, streamId],
+    function: `${env.CONTRACT_ADDRESS}::stream::admin_cancel_stream`,
+    functionArguments: [env.CONTRACT_ADDRESS, streamId, normalizedSender],
   };
 
   const transaction = await aptos.transaction.build.simple({
@@ -115,8 +123,14 @@ export async function cancelStreamOnChain(streamId: number): Promise<string> {
     transaction,
   });
 
-  await aptos.waitForTransaction({ transactionHash: committedTxn.hash });
-  return committedTxn.hash;
+  const result = await aptos.waitForTransaction({ transactionHash: committedTxn.hash });
+
+  if (!result.success) {
+    throw new Error(`Failed to cancel stream: ${result.vm_status}`);
+  }
+
+  console.log(`Stream ${streamId} cancelled successfully. Tx: ${committedTxn.hash}`);
+  return { hash: committedTxn.hash };
 }
 
 export async function registerRecipient(

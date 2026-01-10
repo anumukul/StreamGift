@@ -5,8 +5,10 @@ import { usePrivy, useWallets } from '@privy-io/react-auth';
 import Link from 'next/link';
 import { Navigation } from '@/components/layout/Navigation';
 import { api } from '@/lib/api';
+import { useStreamActions } from '@/hooks/useStreamActions';
 import { formatAmount, shortenAddress, formatTimeRemaining } from '@/lib/utils';
-import { Loader2, ArrowUpRight, ArrowDownLeft, Clock, ExternalLink } from 'lucide-react';
+import { toast } from 'sonner';
+import { Loader2, ArrowUpRight, ArrowDownLeft, Clock, ExternalLink, XCircle } from 'lucide-react';
 
 interface Stream {
   id: string;
@@ -23,14 +25,45 @@ interface Stream {
 export default function DashboardPage() {
   const { ready, authenticated, login, getAccessToken, user } = usePrivy();
   const { wallets } = useWallets();
+  const { cancelStream, isLoading: isCancelling } = useStreamActions();
 
   const [outgoingStreams, setOutgoingStreams] = useState<Stream[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<Stream[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'outgoing' | 'incoming'>('outgoing');
+  const [cancellingStreamId, setCancellingStreamId] = useState<string | null>(null);
 
   const walletAddress = wallets?.[0]?.address;
   const userEmail = user?.email?.address;
+
+  const handleCancelStream = async (e: React.MouseEvent, streamId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!confirm('Are you sure you want to cancel this stream? Unstreamed tokens will be refunded to you, and any accrued tokens will be sent to the recipient.')) {
+      return;
+    }
+
+    setCancellingStreamId(streamId);
+
+    try {
+      const result = await cancelStream(streamId);
+
+      if (result.success) {
+        toast.success(`Stream cancelled! Refunded: ${formatAmount(result.refundedAmount || '0')} MOVE`);
+
+        setOutgoingStreams(prev =>
+          prev.map(s => s.id === streamId ? { ...s, status: 'CANCELLED' } : s)
+        );
+      } else {
+        toast.error(result.error || 'Failed to cancel stream');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to cancel stream');
+    } finally {
+      setCancellingStreamId(null);
+    }
+  };
 
   useEffect(() => {
     const fetchStreams = async () => {
@@ -153,10 +186,13 @@ export default function DashboardPage() {
               const endTime = new Date(stream.endTime);
               const totalAmount = BigInt(stream.totalAmount || '0');
               const claimedAmount = BigInt(stream.claimedAmount || '0');
-              const progress = totalAmount > 0n 
+              const progress = totalAmount > 0n
                 ? Number((claimedAmount * 100n) / totalAmount)
                 : 0;
               const isComplete = stream.status === 'COMPLETED';
+              const isCancelled = stream.status === 'CANCELLED';
+              const canCancel = activeTab === 'outgoing' && stream.status === 'ACTIVE' && claimedAmount < totalAmount;
+              const isThisCancelling = cancellingStreamId === stream.id;
 
               return (
                 <Link
@@ -178,11 +214,27 @@ export default function DashboardPage() {
                           )}
                       </p>
                     </div>
-                    <div className="text-right">
-                      <p className="text-sm text-gray-500">Amount</p>
-                      <p className="font-semibold text-gray-900">
-                        {formatAmount(stream.totalAmount)} MOVE
-                      </p>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <p className="text-sm text-gray-500">Amount</p>
+                        <p className="font-semibold text-gray-900">
+                          {formatAmount(stream.totalAmount)} MOVE
+                        </p>
+                      </div>
+                      {canCancel && (
+                        <button
+                          onClick={(e) => handleCancelStream(e, stream.id)}
+                          disabled={isThisCancelling}
+                          className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+                          title="Cancel stream"
+                        >
+                          {isThisCancelling ? (
+                            <Loader2 className="h-5 w-5 animate-spin" />
+                          ) : (
+                            <XCircle className="h-5 w-5" />
+                          )}
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -191,6 +243,8 @@ export default function DashboardPage() {
                       <Clock className="h-4 w-4" />
                       {isComplete ? (
                         <span className="text-green-600">Completed</span>
+                      ) : isCancelled ? (
+                        <span className="text-red-600">Cancelled</span>
                       ) : (
                         <span>{formatTimeRemaining(endTime)} remaining</span>
                       )}
@@ -198,7 +252,7 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-2">
                       <div className="h-2 w-24 bg-gray-200 rounded-full overflow-hidden">
                         <div
-                          className="h-full bg-violet-600 rounded-full"
+                          className={`h-full rounded-full ${isCancelled ? 'bg-red-400' : 'bg-violet-600'}`}
                           style={{ width: `${progress}%` }}
                         />
                       </div>

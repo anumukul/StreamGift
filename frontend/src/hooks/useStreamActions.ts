@@ -191,7 +191,13 @@ export function useStreamActions() {
   );
 
   const cancelStream = useCallback(
-    async (streamId: string): Promise<{ success: boolean; error?: string }> => {
+    async (streamId: string): Promise<{
+      success: boolean;
+      refundedAmount?: string;
+      recipientAmount?: string;
+      transaction?: { hash: string; explorerUrl: string };
+      error?: string;
+    }> => {
       if (!authenticated) {
         return { success: false, error: 'Not authenticated' };
       }
@@ -209,7 +215,18 @@ export function useStreamActions() {
           throw new Error('Failed to get access token');
         }
 
-        return { success: false, error: 'Cancel not implemented yet' };
+        const response = await api.streams.cancel(
+          streamId,
+          { walletAddress },
+          token
+        );
+
+        return {
+          success: response.success,
+          refundedAmount: response.refundedAmount,
+          recipientAmount: response.recipientAmount,
+          transaction: response.transaction,
+        };
       } catch (err: any) {
         const errorMessage = err.message || 'Failed to cancel stream';
         setError(errorMessage);

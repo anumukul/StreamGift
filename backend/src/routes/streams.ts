@@ -5,6 +5,7 @@ import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js';
 import {
   createStreamOnChain,
   getClaimableOnChain,
+  cancelStreamOnChain,
 } from '../services/movementBlockchain.js';
 import {
   verifyCreateStreamAuthorization,
@@ -372,6 +373,90 @@ router.get('/user/incoming', authMiddleware, async (req: AuthenticatedRequest, r
   } catch (error) {
     console.error('Failed to get incoming streams:', error);
     res.status(500).json({ error: 'Failed to get incoming streams' });
+  }
+});
+
+// Cancel a stream (sender only)
+router.post('/:id/cancel', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const stream = await prisma.stream.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!stream) {
+      res.status(404).json({ error: 'Stream not found' });
+      return;
+    }
+
+    const userWalletAddress = req.body.walletAddress || req.user!.walletAddress;
+
+    if (!userWalletAddress) {
+      res.status(400).json({ error: 'No wallet address provided' });
+      return;
+    }
+
+    // Verify the user is the stream creator
+    if (stream.senderAddress.toLowerCase() !== userWalletAddress.toLowerCase()) {
+      res.status(403).json({ error: 'Only the stream creator can cancel this stream' });
+      return;
+    }
+
+    if (stream.status !== 'ACTIVE') {
+      res.status(400).json({ error: `Cannot cancel stream with status: ${stream.status}` });
+      return;
+    }
+
+    if (stream.onChainId <= 0) {
+      res.status(400).json({ error: 'Stream not found on-chain' });
+      return;
+    }
+
+    // Calculate refund amounts
+    const totalAmount = BigInt(stream.totalAmount);
+    const claimedAmount = BigInt(stream.claimedAmount);
+    const now = Math.floor(Date.now() / 1000);
+    const startTime = Math.floor(stream.startTime.getTime() / 1000);
+    const elapsed = Math.max(0, now - startTime);
+    const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
+    const remaining = totalAmount - claimedAmount;
+    const claimableByRecipient = accrued > remaining ? remaining : accrued;
+    const refundToSender = remaining - claimableByRecipient;
+
+    // Execute on-chain cancellation
+    let txResult;
+    try {
+      console.log(`Cancelling stream ${stream.onChainId} for sender ${stream.senderAddress}`);
+      txResult = await cancelStreamOnChain(stream.onChainId, stream.senderAddress);
+      console.log(`Stream cancelled successfully. Tx: ${txResult.hash}`);
+    } catch (cancelError: any) {
+      console.error('Failed to cancel stream on-chain:', cancelError);
+      res.status(500).json({
+        error: 'Failed to cancel stream on blockchain',
+        details: cancelError.message,
+      });
+      return;
+    }
+
+    // Update database
+    await prisma.stream.update({
+      where: { id: stream.id },
+      data: {
+        status: 'CANCELLED',
+      },
+    });
+
+    res.json({
+      success: true,
+      refundedAmount: refundToSender.toString(),
+      recipientAmount: claimableByRecipient.toString(),
+      transaction: {
+        hash: txResult.hash,
+        explorerUrl: `https://explorer.movementnetwork.xyz/txn/${txResult.hash}?network=bardock+testnet`,
+      },
+    });
+  } catch (error: any) {
+    console.error('Failed to cancel stream:', error);
+    res.status(500).json({ error: 'Failed to cancel stream', details: error.message });
   }
 });
 
