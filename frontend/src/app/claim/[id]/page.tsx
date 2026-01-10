@@ -2,14 +2,18 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { usePrivy } from '@privy-io/react-auth';
+import { usePrivy, useWallets, useCreateWallet } from '@privy-io/react-auth';
 import { toast } from 'sonner';
 import { Navigation } from '@/components/layout/Navigation';
 import { StreamTicker } from '@/components/stream/StreamTicker';
 import { StreamProgress } from '@/components/stream/StreamProgress';
+import { useStreamActions } from '@/hooks/useStreamActions';
 import { api } from '@/lib/api';
 import { formatAmount, shortenAddress, formatDuration } from '@/lib/utils';
-import { Loader2, User, Calendar, MessageSquare, CheckCircle, Share2, Copy } from 'lucide-react';
+import { 
+  Loader2, User, Calendar, MessageSquare, CheckCircle, 
+  Share2, Copy, AlertCircle, ExternalLink 
+} from 'lucide-react';
 
 interface StreamData {
   id: string;
@@ -31,12 +35,30 @@ export default function ClaimPage() {
   const params = useParams();
   const streamId = params.id as string;
 
-  const { ready, authenticated, login, getAccessToken } = usePrivy();
+  const { ready, authenticated, login, getAccessToken, user } = usePrivy();
+  const { wallets, ready: walletsReady } = useWallets();
+  const { createWallet } = useCreateWallet();
+  const { claimStream, isLoading: isClaiming } = useStreamActions();
 
   const [stream, setStream] = useState<StreamData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [claiming, setClaiming] = useState(false);
-  const [claimed, setClaimed] = useState(false);
+  const [claimStep, setClaimStep] = useState<'idle' | 'signing' | 'confirming' | 'success'>('idle');
+  const [lastTransaction, setLastTransaction] = useState<{
+    hash?: string;
+    explorerUrl?: string;
+  } | null>(null);
+
+  const walletAddress = wallets?.[0]?.address;
+  const userEmail = user?.email?.address;
+
+  const isRecipient = stream && (
+    (walletAddress && stream.recipient.toLowerCase() === walletAddress.toLowerCase()) ||
+    (userEmail && stream.recipientSocial?.type === 'email' && 
+     stream.recipientSocial?.handle?.toLowerCase().replace('@', '') === userEmail.toLowerCase().replace('@', ''))
+  );
+
+  const isSender = stream && walletAddress && 
+    stream.sender.toLowerCase() === walletAddress.toLowerCase();
 
   useEffect(() => {
     const fetchStream = async () => {
@@ -64,29 +86,54 @@ export default function ClaimPage() {
       return;
     }
 
-    setClaiming(true);
+    let currentWalletAddress = walletAddress;
+
+    if (!currentWalletAddress) {
+      try {
+        toast.info('Creating your wallet...');
+        const wallet = await createWallet();
+        currentWalletAddress = wallet.address;
+        toast.success('Wallet created!');
+      } catch (error: any) {
+        toast.error('Failed to create wallet');
+        return;
+      }
+    }
+
+    if (!isRecipient && !userEmail) {
+      toast.error('Only the recipient can claim this stream');
+      return;
+    }
+
+    setClaimStep('signing');
+    toast.info('Please sign the message in your wallet to claim your tokens');
 
     try {
-      const token = await getAccessToken();
-      if (!token) throw new Error('Not authenticated');
+      const result = await claimStream(streamId, currentWalletAddress);
 
-      const prepareResponse = await api.claim.prepare(streamId, {}, token);
+      if (result.success) {
+        setClaimStep('success');
+        setLastTransaction({
+          hash: result.transaction?.hash,
+          explorerUrl: result.transaction?.explorerUrl,
+        });
+        toast.success(`Successfully claimed ${formatAmount(result.claimedAmount || '0')} MOVE!`);
 
-      toast.success('Claim successful!');
-      setClaimed(true);
-
-      const updatedStream = await api.streams.get(streamId, token);
-      setStream(updatedStream);
+        const token = await getAccessToken();
+        const updatedStream = await api.streams.get(streamId, token || undefined);
+        setStream(updatedStream);
+      } else {
+        throw new Error(result.error || 'Failed to claim');
+      }
     } catch (error: any) {
       toast.error(error.message || 'Failed to claim');
-    } finally {
-      setClaiming(false);
+      setClaimStep('idle');
     }
   };
 
   const handleShare = async () => {
     const shareUrl = window.location.href;
-    const shareText = `I'm receiving a StreamGift! Check it out:`;
+    const shareText = 'I received a StreamGift! Check it out:';
 
     if (navigator.share) {
       try {
@@ -96,7 +143,7 @@ export default function ClaimPage() {
           url: shareUrl,
         });
       } catch (error) {
-        // User cancelled or share failed
+        // User cancelled
       }
     } else {
       handleCopyLink();
@@ -134,32 +181,67 @@ export default function ClaimPage() {
   const totalDuration = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
   const remainingAmount = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
 
+  const explorerLink = lastTransaction?.explorerUrl || '';
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-violet-50 to-white">
       <Navigation />
 
       <main className="mx-auto max-w-2xl px-4 py-12">
         <div className="bg-white rounded-3xl shadow-lg border border-gray-100 overflow-hidden">
-          {/* Header */}
           <div className="bg-gradient-to-r from-violet-600 to-purple-600 px-8 py-6">
             <p className="text-violet-200 text-sm">StreamGift</p>
             <h1 className="text-2xl font-bold text-white mt-1">
               {stream.recipientSocial
                 ? `Gift for ${stream.recipientSocial.handle}`
-                : 'Your Stream'}
+                : 'Stream Details'}
             </h1>
+            {stream.onChainId > 0 && (
+              <p className="text-violet-200 text-sm mt-2">
+                On-chain Stream #{stream.onChainId}
+              </p>
+            )}
           </div>
 
           <div className="p-8">
-            {/* Success Message */}
-            {claimed && (
-              <div className="mb-6 flex items-center gap-3 bg-green-50 text-green-700 px-4 py-3 rounded-xl">
-                <CheckCircle className="h-5 w-5" />
-                <span className="font-medium">Claim successful!</span>
+            {claimStep === 'success' && lastTransaction && (
+              <div className="mb-6 bg-green-50 border border-green-200 rounded-xl p-4">
+                <div className="flex items-center gap-3 text-green-700 mb-2">
+                  <CheckCircle className="h-5 w-5" />
+                  <span className="font-medium">Claim successful!</span>
+                </div>
+                {lastTransaction.hash && explorerLink && (
+                  <a href={explorerLink} target="_blank" rel="noopener noreferrer" className="text-sm text-green-600 hover:text-green-700 flex items-center gap-1">
+                    View transaction on explorer
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
               </div>
             )}
 
-            {/* Status Badges */}
+            {authenticated && (
+              <div className="mb-6">
+                {isRecipient && (
+                  <div className="flex items-center gap-2 bg-green-50 text-green-700 px-4 py-2 rounded-lg">
+                    <CheckCircle className="h-4 w-4" />
+                    <span className="text-sm font-medium">You are the recipient</span>
+                  </div>
+                )}
+                {isSender && !isRecipient && (
+                  <div className="flex items-center gap-2 bg-blue-50 text-blue-700 px-4 py-2 rounded-lg">
+                    <User className="h-4 w-4" />
+                    <span className="text-sm font-medium">You created this stream</span>
+                  </div>
+                )}
+                {!isRecipient && !isSender && (
+                  <div className="flex items-center gap-2 bg-yellow-50 text-yellow-700 px-4 py-2 rounded-lg">
+                    <AlertCircle className="h-4 w-4" />
+                    <span className="text-sm font-medium">You are viewing someone else&#39;s stream</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {isComplete && (
               <div className="mb-6 flex items-center gap-3 bg-blue-50 text-blue-700 px-4 py-3 rounded-xl">
                 <CheckCircle className="h-5 w-5" />
@@ -173,7 +255,6 @@ export default function ClaimPage() {
               </div>
             )}
 
-            {/* Stream Ticker */}
             {!isComplete && !isCancelled && (
               <div className="mb-8">
                 <StreamTicker
@@ -186,7 +267,6 @@ export default function ClaimPage() {
               </div>
             )}
 
-            {/* Completed Amount Display */}
             {isComplete && (
               <div className="mb-8 text-center">
                 <p className="text-sm text-gray-500 mb-2">Total Received</p>
@@ -197,7 +277,6 @@ export default function ClaimPage() {
               </div>
             )}
 
-            {/* Progress Bar */}
             <div className="mb-8">
               <StreamProgress
                 startTime={startTime}
@@ -207,7 +286,6 @@ export default function ClaimPage() {
               />
             </div>
 
-            {/* Stats Grid */}
             <div className="grid grid-cols-2 gap-4 mb-8">
               <div className="bg-gray-50 rounded-xl p-4">
                 <p className="text-sm text-gray-500 mb-1">Total Amount</p>
@@ -235,20 +313,18 @@ export default function ClaimPage() {
               </div>
             </div>
 
-            {/* Stream Details */}
             <div className="space-y-4 mb-8">
               <div className="flex items-center gap-3 text-gray-600">
                 <User className="h-5 w-5" />
-                <span className="text-sm">
-                  From: {shortenAddress(stream.sender)}
-                </span>
+                <span className="text-sm">From: {shortenAddress(stream.sender)}</span>
+              </div>
+              <div className="flex items-center gap-3 text-gray-600">
+                <User className="h-5 w-5" />
+                <span className="text-sm">To: {stream.recipientSocial?.handle || shortenAddress(stream.recipient)}</span>
               </div>
               <div className="flex items-center gap-3 text-gray-600">
                 <Calendar className="h-5 w-5" />
-                <span className="text-sm">
-                  Started {startTime.toLocaleDateString()} at{' '}
-                  {startTime.toLocaleTimeString()}
-                </span>
+                <span className="text-sm">Started {startTime.toLocaleDateString()} at {startTime.toLocaleTimeString()}</span>
               </div>
               {stream.message && (
                 <div className="flex items-start gap-3 text-gray-600">
@@ -260,35 +336,49 @@ export default function ClaimPage() {
               )}
             </div>
 
-            {/* Claim Button */}
             {!isComplete && !isCancelled && (
-              <button
-                onClick={handleClaim}
-                disabled={claiming}
-                className="w-full flex items-center justify-center gap-2 bg-violet-600 text-white py-4 rounded-xl font-semibold text-lg hover:bg-violet-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {claiming ? (
-                  <>
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    <span>Claiming...</span>
-                  </>
-                ) : authenticated ? (
-                  'Claim Now - Free'
+              <div>
+                {!authenticated ? (
+                  <button
+                    onClick={login}
+                    className="w-full flex items-center justify-center gap-2 bg-violet-600 text-white py-4 rounded-xl font-semibold text-lg hover:bg-violet-700 transition-colors"
+                  >
+                    Sign In to Claim
+                  </button>
+                ) : isRecipient || (userEmail && stream.recipientSocial?.type === 'email') ? (
+                  <button
+                    onClick={handleClaim}
+                    disabled={isClaiming || claimStep === 'signing'}
+                    className="w-full flex items-center justify-center gap-2 bg-violet-600 text-white py-4 rounded-xl font-semibold text-lg hover:bg-violet-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {claimStep === 'signing' ? (
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span>Sign in Wallet...</span>
+                      </>
+                    ) : isClaiming ? (
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span>Claiming...</span>
+                      </>
+                    ) : (
+                      'Claim Now - Free'
+                    )}
+                  </button>
                 ) : (
-                  'Sign In to Claim'
+                  <div className="bg-gray-100 text-gray-500 py-4 rounded-xl text-center font-medium">
+                    Only the recipient can claim this stream
+                  </div>
                 )}
-              </button>
+              </div>
             )}
 
-            {/* Help Text */}
             {!authenticated && !isComplete && (
               <p className="text-center text-sm text-gray-500 mt-4">
-                Sign in with your email or social account to claim. No gas fees
-                required.
+                Sign in with your email or social account to claim. No gas fees required.
               </p>
             )}
 
-            {/* Share Buttons */}
             <div className="flex gap-3 mt-6">
               <button
                 onClick={handleShare}
@@ -308,19 +398,23 @@ export default function ClaimPage() {
           </div>
         </div>
 
-        {/* Transaction Info (for authenticated users) */}
-        {authenticated && stream.onChainId > 0 && (
+        {stream.onChainId > 0 && (
           <div className="mt-6 bg-white rounded-xl border border-gray-200 p-4">
             <p className="text-sm text-gray-500 mb-2">On-Chain Details</p>
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-600">Stream ID</span>
-              <span className="text-sm font-mono text-gray-900">
-                #{stream.onChainId}
-              </span>
+              <span className="text-sm font-mono text-gray-900">#{stream.onChainId}</span>
             </div>
             <div className="flex items-center justify-between mt-2">
               <span className="text-sm text-gray-600">Network</span>
               <span className="text-sm text-gray-900">Movement Testnet</span>
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-sm text-gray-600">Explorer</span>
+              <a href="https://explorer.movementnetwork.xyz/?network=bardock+testnet" target="_blank" rel="noopener noreferrer" className="text-sm text-violet-600 hover:text-violet-700 flex items-center gap-1">
+                View on Explorer
+                <ExternalLink className="h-3 w-3" />
+              </a>
             </div>
           </div>
         )}

@@ -21,7 +21,7 @@ interface Stream {
 }
 
 export default function DashboardPage() {
-  const { ready, authenticated, login, getAccessToken } = usePrivy();
+  const { ready, authenticated, login, getAccessToken, user } = usePrivy();
   const { wallets } = useWallets();
 
   const [outgoingStreams, setOutgoingStreams] = useState<Stream[]>([]);
@@ -30,6 +30,7 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'outgoing' | 'incoming'>('outgoing');
 
   const walletAddress = wallets?.[0]?.address;
+  const userEmail = user?.email?.address;
 
   useEffect(() => {
     const fetchStreams = async () => {
@@ -44,7 +45,7 @@ export default function DashboardPage() {
 
         const [outgoing, incoming] = await Promise.all([
           api.streams.getOutgoing(token, walletAddress),
-          api.streams.getIncoming(token, walletAddress),
+          api.streams.getIncoming(token, walletAddress, userEmail),
         ]);
 
         setOutgoingStreams(outgoing.streams || []);
@@ -59,7 +60,7 @@ export default function DashboardPage() {
     if (ready && walletAddress) {
       fetchStreams();
     }
-  }, [ready, authenticated, getAccessToken, walletAddress]);
+  }, [ready, authenticated, getAccessToken, walletAddress, userEmail]);
 
   if (!ready || loading) {
     return (

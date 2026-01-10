@@ -1,16 +1,23 @@
 import { Router, Response } from 'express';
-import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
-import { nanoid } from 'nanoid';
-import { AuthenticatedRequest, authMiddleware, optionalAuthMiddleware } from '../middleware/auth.js';
-import { hashSocialHandle } from '../utils/crypto.js';
-import { registerRecipient, getClaimableAmount, getContractAddress } from '../services/movement.js';
-import { sendStreamCreatedEmail } from '../services/notification.js';
+import { z } from 'zod';
+import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js';
+import {
+  createStreamOnChain,
+  getClaimableOnChain,
+} from '../services/movementBlockchain.js';
+import {
+  verifyCreateStreamAuthorization,
+  createSocialHash,
+  createAuthorizationMessage,
+} from '../utils/signatureVerification.js';
+import { sendStreamNotificationEmail } from '../services/notification.js';
 import { env } from '../config/env.js';
 
 const router = Router();
 const prisma = new PrismaClient();
 
+// Schema for creating a stream
 const createStreamSchema = z.object({
   recipientType: z.enum(['email', 'twitter', 'wallet']),
   recipientValue: z.string(),
@@ -19,118 +26,199 @@ const createStreamSchema = z.object({
   startTime: z.number().optional(),
   message: z.string().optional(),
   senderAddress: z.string(),
+  // Signature fields for on-chain authorization
+  signature: z.string().optional(),
+  signedMessage: z.string().optional(),
 });
 
+// Get authorization message to sign (called before creating stream)
+router.post('/prepare-create', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { recipientType, recipientValue, amount, durationSeconds, message, senderAddress } = req.body;
+
+    const { message: authMessage, data } = createAuthorizationMessage('create_stream', {
+      recipientType,
+      recipientValue,
+      amount,
+      durationSeconds,
+      message: message || '',
+      senderAddress,
+    });
+
+    res.json({
+      message: authMessage,
+      data,
+      instructions: 'Sign this message with your wallet to authorize the stream creation',
+    });
+  } catch (error) {
+    console.error('Failed to prepare stream creation:', error);
+    res.status(500).json({ error: 'Failed to prepare stream creation' });
+  }
+});
+
+// Create a new stream
 router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const body = createStreamSchema.parse(req.body);
-    const senderAddress = body.senderAddress;
 
+    const senderAddress = body.senderAddress;
     if (!senderAddress) {
-      res.status(400).json({ error: 'Sender wallet address not found' });
+      res.status(400).json({ error: 'Sender address is required' });
       return;
     }
 
-    let recipientAddress: string;
-    let socialHash: string | null = null;
+    // Determine recipient address
+    let recipientAddress = '';
+    let socialHash = new Uint8Array(32);
 
     if (body.recipientType === 'wallet') {
-      recipientAddress = body.recipientValue;
-    } else {
-      socialHash = hashSocialHandle(body.recipientType, body.recipientValue);
-      
-      const existingMapping = await prisma.socialMapping.findUnique({
-        where: { socialHash },
-      });
+  recipientAddress = body.recipientValue;
+} else {
+  // For email/twitter, check if they have a registered address
+  const existingMapping = await prisma.socialMapping.findUnique({
+    where: {
+      socialType_socialHandle: {
+        socialType: body.recipientType,
+        socialHandle: body.recipientValue.toLowerCase().replace('@', ''),
+      },
+    },
+  });
 
       if (existingMapping) {
         recipientAddress = existingMapping.walletAddress;
       } else {
-        recipientAddress = `0x${nanoid(64).replace(/[^a-f0-9]/gi, '0').substring(0, 64)}`;
-        
-        await prisma.socialMapping.create({
-          data: {
-            socialType: body.recipientType,
-            socialHandle: body.recipientValue,
-            socialHash,
-            walletAddress: recipientAddress,
-          },
-        });
-
-        try {
-          await registerRecipient(socialHash, recipientAddress);
-        } catch (error) {
-          console.error('Failed to register recipient on-chain:', error);
-        }
+        // Use a placeholder address - recipient will register their address when claiming
+        recipientAddress = '0x0000000000000000000000000000000000000000000000000000000000000000';
       }
+
+      socialHash = createSocialHash(body.recipientType, body.recipientValue);
     }
 
     const startTime = body.startTime || Math.floor(Date.now() / 1000);
     const endTime = startTime + body.durationSeconds;
     const ratePerSecond = (BigInt(body.amount) / BigInt(body.durationSeconds)).toString();
 
+    // If signature provided, verify and submit on-chain
+    let onChainId = 0;
+    let transactionHash: string | undefined;
+    let onChainStatus = 'PENDING';
+
+    if (body.signature && body.signedMessage) {
+      // Verify the signature
+      const verification = await verifyCreateStreamAuthorization({
+        senderAddress,
+        recipientAddress,
+        amount: body.amount,
+        durationSeconds: body.durationSeconds,
+        message: body.message,
+        signature: body.signature,
+        signedMessage: body.signedMessage,
+      });
+
+      if (!verification.valid) {
+        res.status(400).json({ error: verification.error || 'Invalid authorization' });
+        return;
+      }
+
+      // Submit to blockchain
+      try {
+        const onChainResult = await createStreamOnChain({
+          senderAddress,
+          recipientAddress,
+          socialHash,
+          amount: body.amount,
+          durationSeconds: body.durationSeconds,
+          startTime,
+          message: body.message || '',
+          signature: body.signature,
+        });
+
+        onChainId = onChainResult.streamId;
+        transactionHash = onChainResult.hash;
+        onChainStatus = 'CONFIRMED';
+        console.log(`Stream created on-chain: ID ${onChainId}, TX: ${transactionHash}`);
+      } catch (onChainError: any) {
+        console.error('On-chain creation failed:', onChainError);
+        // Continue with database-only creation for demo purposes
+        onChainStatus = 'FAILED';
+      }
+    }
+
+    // Convert socialHash to hex string for storage
+    const socialHashHex = body.recipientType !== 'wallet'
+      ? Buffer.from(socialHash).toString('hex')
+      : null;
+
+    // Save to database
     const stream = await prisma.stream.create({
       data: {
-        id: nanoid(),
-        onChainId: 0,
         senderAddress,
         recipientAddress,
         recipientSocialType: body.recipientType !== 'wallet' ? body.recipientType : null,
-        recipientSocialHandle: body.recipientType !== 'wallet' ? body.recipientValue : null,
-        recipientSocialHash: socialHash,
+        recipientSocialHandle: body.recipientType !== 'wallet' ? body.recipientValue.toLowerCase().replace('@', '') : null,
+        recipientSocialHash: socialHashHex,
         totalAmount: body.amount,
+        claimedAmount: '0',
         ratePerSecond,
         startTime: new Date(startTime * 1000),
         endTime: new Date(endTime * 1000),
-        message: body.message,
+        message: body.message || null,
+        status: 'ACTIVE',
+        onChainId,
       },
     });
 
-    const claimUrl = `${env.FRONTEND_URL}/claim/${stream.id}`;
-
+    // Send notification email if recipient is email
     if (body.recipientType === 'email') {
-      const durationDays = Math.ceil(body.durationSeconds / 86400);
-      await sendStreamCreatedEmail(body.recipientValue, {
-        streamId: stream.id,
-        senderName: senderAddress.substring(0, 8) + '...',
-        amount: (BigInt(body.amount) / BigInt(1e8)).toString(),
-        duration: `${durationDays} day${durationDays > 1 ? 's' : ''}`,
-        message: body.message,
-        claimUrl,
-      });
+      const claimUrl = `${env.FRONTEND_URL}/claim/${stream.id}`;
+      try {
+        await sendStreamNotificationEmail(
+          body.recipientValue,
+          (BigInt(body.amount) / BigInt(1e8)).toString(),
+          claimUrl
+        );
+      } catch (emailError) {
+        console.error('Failed to send notification email:', emailError);
+      }
     }
 
     res.status(201).json({
       stream: {
         id: stream.id,
-        contractAddress: getContractAddress(),
-        recipientAddress,
-        claimUrl,
+        onChainId: Number(stream.onChainId),
+        sender: stream.senderAddress,
+        recipient: stream.recipientAddress,
+        recipientSocial: stream.recipientSocialType
+          ? { type: stream.recipientSocialType, handle: stream.recipientSocialHandle }
+          : null,
+        totalAmount: stream.totalAmount,
+        claimedAmount: stream.claimedAmount,
+        ratePerSecond: stream.ratePerSecond,
+        startTime: stream.startTime.toISOString(),
+        endTime: stream.endTime.toISOString(),
+        message: stream.message,
+        status: stream.status,
       },
       transaction: {
-        function: `${getContractAddress()}::stream::create_stream`,
-        arguments: [
-          getContractAddress(),
-          recipientAddress,
-          socialHash ? Array.from(Buffer.from(socialHash, 'hex')) : [],
-          body.amount,
-          body.durationSeconds,
-          startTime,
-          body.message || '',
-        ],
+        hash: transactionHash,
+        status: onChainStatus,
+        explorerUrl: transactionHash
+          ? `https://explorer.movementnetwork.xyz/txn/${transactionHash}?network=bardock+testnet`
+          : null,
       },
     });
   } catch (error) {
+    console.error('Failed to create stream:', error);
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Failed to prepare stream:', error);
-    res.status(500).json({ error: 'Failed to prepare stream' });
+    res.status(500).json({ error: 'Failed to create stream' });
   }
 });
 
-router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+// Get a specific stream
+router.get('/:id', async (req, res) => {
   try {
     const stream = await prisma.stream.findUnique({
       where: { id: req.params.id },
@@ -141,39 +229,37 @@ router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res
       return;
     }
 
+    // Calculate current claimable amount
+    const now = Math.floor(Date.now() / 1000);
+    const startTime = Math.floor(stream.startTime.getTime() / 1000);
     let claimable = '0';
-    if (stream.onChainId > 0) {
+
+    if (now > startTime) {
+      const elapsed = now - startTime;
+      const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
+      const totalRemaining = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
+      claimable = (accrued > totalRemaining ? totalRemaining : accrued).toString();
+    }
+
+    // Try to get on-chain claimable if available
+    const onChainIdNum = Number(stream.onChainId);
+    if (onChainIdNum > 0) {
       try {
-        const claimableAmount = await getClaimableAmount(stream.onChainId);
-        claimable = claimableAmount.toString();
-      } catch {
-        const now = Math.floor(Date.now() / 1000);
-        const startTime = Math.floor(stream.startTime.getTime() / 1000);
-        if (now > startTime) {
-          const elapsed = now - startTime;
-          const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
-          const remaining = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
-          claimable = (accrued > remaining ? remaining : accrued).toString();
+        const onChainClaimable = await getClaimableOnChain(onChainIdNum);
+        if (onChainClaimable > 0n) {
+          claimable = onChainClaimable.toString();
         }
-      }
-    } else {
-      // Calculate claimable for streams not yet on-chain
-      const now = Math.floor(Date.now() / 1000);
-      const startTime = Math.floor(stream.startTime.getTime() / 1000);
-      if (now > startTime) {
-        const elapsed = now - startTime;
-        const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
-        const remaining = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
-        claimable = (accrued > remaining ? remaining : accrued).toString();
+      } catch (e) {
+        // Use calculated value
       }
     }
 
     res.json({
       id: stream.id,
-      onChainId: stream.onChainId,
+      onChainId: onChainIdNum,
       sender: stream.senderAddress,
       recipient: stream.recipientAddress,
-      recipientSocial: stream.recipientSocialHandle
+      recipientSocial: stream.recipientSocialType
         ? { type: stream.recipientSocialType, handle: stream.recipientSocialHandle }
         : null,
       totalAmount: stream.totalAmount,
@@ -184,7 +270,6 @@ router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res
       endTime: stream.endTime.toISOString(),
       message: stream.message,
       status: stream.status,
-      createdAt: stream.createdAt.toISOString(),
     });
   } catch (error) {
     console.error('Failed to get stream:', error);
@@ -192,10 +277,11 @@ router.get('/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res
   }
 });
 
+// Get outgoing streams for a user
 router.get('/user/outgoing', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const walletAddress = req.query.walletAddress as string;
-    
+
     if (!walletAddress) {
       res.status(400).json({ error: 'Wallet address required' });
       return;
@@ -206,47 +292,86 @@ router.get('/user/outgoing', authMiddleware, async (req: AuthenticatedRequest, r
       orderBy: { createdAt: 'desc' },
     });
 
-    res.json({ streams });
+    res.json({
+      streams: streams.map((stream) => ({
+        id: stream.id,
+        onChainId: Number(stream.onChainId),
+        sender: stream.senderAddress,
+        recipient: stream.recipientAddress,
+        recipientSocial: stream.recipientSocialType
+          ? { type: stream.recipientSocialType, handle: stream.recipientSocialHandle }
+          : null,
+        totalAmount: stream.totalAmount,
+        claimedAmount: stream.claimedAmount,
+        ratePerSecond: stream.ratePerSecond,
+        startTime: stream.startTime.toISOString(),
+        endTime: stream.endTime.toISOString(),
+        message: stream.message,
+        status: stream.status,
+      })),
+    });
   } catch (error) {
     console.error('Failed to get outgoing streams:', error);
-    res.status(500).json({ error: 'Failed to get streams' });
+    res.status(500).json({ error: 'Failed to get outgoing streams' });
   }
 });
 
+// Get incoming streams for a user
+// Get incoming streams for a user
+
+  // Get incoming streams for a user
 router.get('/user/incoming', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const walletAddress = req.query.walletAddress as string;
-    
-    if (!walletAddress) {
-      res.status(400).json({ error: 'Wallet address required' });
+    const email = req.query.email as string;
+
+    if (!walletAddress && !email) {
+      res.status(400).json({ error: 'Wallet address or email required' });
       return;
     }
 
+    // Build OR conditions for finding streams
+    const orConditions: any[] = [];
+    
+    if (walletAddress) {
+      orConditions.push({ recipientAddress: walletAddress });
+    }
+    
+    if (email) {
+  orConditions.push({ 
+    recipientSocialType: 'email', 
+    recipientSocialHandle: email.toLowerCase().replace('@', '') 
+  });
+}
+
     const streams = await prisma.stream.findMany({
-      where: { recipientAddress: walletAddress },
+      where: {
+        OR: orConditions,
+      },
       orderBy: { createdAt: 'desc' },
     });
 
-    res.json({ streams });
+    res.json({
+      streams: streams.map((stream) => ({
+        id: stream.id,
+        onChainId: Number(stream.onChainId),
+        sender: stream.senderAddress,
+        recipient: stream.recipientAddress,
+        recipientSocial: stream.recipientSocialType
+          ? { type: stream.recipientSocialType, handle: stream.recipientSocialHandle }
+          : null,
+        totalAmount: stream.totalAmount,
+        claimedAmount: stream.claimedAmount,
+        ratePerSecond: stream.ratePerSecond,
+        startTime: stream.startTime.toISOString(),
+        endTime: stream.endTime.toISOString(),
+        message: stream.message,
+        status: stream.status,
+      })),
+    });
   } catch (error) {
     console.error('Failed to get incoming streams:', error);
-    res.status(500).json({ error: 'Failed to get streams' });
-  }
-});
-
-router.patch('/:id/confirm', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { onChainId, transactionHash } = req.body;
-
-    const stream = await prisma.stream.update({
-      where: { id: req.params.id },
-      data: { onChainId },
-    });
-
-    res.json({ stream });
-  } catch (error) {
-    console.error('Failed to confirm stream:', error);
-    res.status(500).json({ error: 'Failed to confirm stream' });
+    res.status(500).json({ error: 'Failed to get incoming streams' });
   }
 });
 

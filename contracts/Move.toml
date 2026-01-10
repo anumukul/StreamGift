@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-streamgift = "0x9892aa20d7ba7b58dedf37f98f18557a3c62f1bf7cd950415a408c06a5e704f5"
+streamgift = "0x20d7186b4c873e2089901fa57d02785ba300db5f85b031847ea63fc45e0d6d4a"
 
 [dependencies]
 AptosFramework = { git = "https://github.com/movementlabsxyz/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "main" }

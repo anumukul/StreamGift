@@ -31,7 +31,8 @@ export function parseAmount(amount: string, decimals: number = 8): string {
   return (BigInt(integerPart) * BigInt(10 ** decimals) + BigInt(fractionalPart)).toString();
 }
 
-export function shortenAddress(address: string, chars: number = 4): string {
+export function shortenAddress(address: string | null | undefined, chars: number = 4): string {
+  if (!address) return '';
   return `${address.substring(0, chars + 2)}...${address.substring(address.length - chars)}`;
 }
 

@@ -11,7 +11,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
-    "@aptos-labs/ts-sdk": "^1.33.1",
+    "@aptos-labs/ts-sdk": "^1.39.0",
     "@prisma/client": "5.22.0",
     "@privy-io/server-auth": "^1.17.1",
     "@shinami/clients": "^0.9.8",
@@ -21,6 +21,7 @@
     "helmet": "^8.0.0",
     "nanoid": "^5.0.9",
     "resend": "^4.1.2",
+    "viem": "^2.43.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {
