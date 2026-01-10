@@ -1,0 +1,10 @@
+{
+  "env": {
+    "NEXT_DISABLE_TURBOPACK": "1"
+  },
+  "build": {
+    "env": {
+      "NEXT_DISABLE_TURBOPACK": "1"
+    }
+  }
+}
