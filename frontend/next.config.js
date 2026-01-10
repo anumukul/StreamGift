@@ -5,6 +5,8 @@ const path = require('path')
  * trying to parse package test files and non-js assets from that module.
  */
 module.exports = {
+  // Empty turbopack config silences Turbopack/webpack conflict warning in Next 16
+  turbopack: {},
   webpack: (config) => {
     config.resolve = config.resolve || {}
     config.resolve.alias = config.resolve.alias || {}
