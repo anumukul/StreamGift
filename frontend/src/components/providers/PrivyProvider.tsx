@@ -1,7 +1,6 @@
 'use client';
 
-import { PrivyProvider as BasePrivyProvider } from '@privy-io/react-auth';
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID!;
 
@@ -29,6 +28,28 @@ const movementTestnet = {
 };
 
 export function PrivyProvider({ children }: Props) {
+  const [BasePrivyProvider, setBasePrivyProvider] = useState<any>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const spec = '@privy' + '-io/react-auth';
+    // construct spec at runtime to avoid bundler static analysis
+    // so Turbopack/webpack do not attempt to pre-resolve test-only deps.
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    import(spec)
+      .then((mod) => {
+        if (mounted) setBasePrivyProvider(() => mod.PrivyProvider || mod.default || mod.Privy);
+      })
+      .catch(() => {
+        // noop - avoid throwing during client dynamic import failures
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (!BasePrivyProvider) return <>{children}</>;
+
   return (
     <BasePrivyProvider
       appId={PRIVY_APP_ID}

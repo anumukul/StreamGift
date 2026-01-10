@@ -10,7 +10,21 @@ module.exports = {
   webpack: (config) => {
     config.resolve = config.resolve || {}
     config.resolve.alias = config.resolve.alias || {}
-    config.resolve.alias['thread-stream'] = path.resolve(__dirname, 'empty-module.js')
+    const stub = path.resolve(__dirname, 'empty-module.js')
+    // stub known problematic transitive/test-only modules
+    const aliases = [
+      'thread-stream',
+      'pino',
+      'tap',
+      'tape',
+      'desm',
+      'why-is-node-running',
+      'fastbench',
+      'pino-elasticsearch',
+      'why-is-node-running',
+      'desm',
+    ]
+    for (const name of aliases) config.resolve.alias[name] = stub
     return config
   },
 }
