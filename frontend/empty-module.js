@@ -1,8 +1,12 @@
-// Minimal stub to replace `thread-stream` during client/server bundling.
-// Exports a no-op constructor and harmless defaults so imports don't trigger
-// parsing of package test files during Next/Turbopack build.
-class ThreadStreamStub {
-  constructor() {}
+// Local stub for thread-stream to avoid Turbopack parsing test/fixture files
+// Exports a benign no-op factory to satisfy requires during build.
+function ThreadStreamStub() {
+  return {
+    write: () => {},
+    end: () => {},
+    on: () => {},
+  };
 }
 
 module.exports = ThreadStreamStub;
+module.exports.default = ThreadStreamStub;
