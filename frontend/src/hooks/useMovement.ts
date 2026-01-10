@@ -50,17 +50,14 @@ export function useMovement() {
           data: payload,
         });
 
-        // For now, we'll simulate the transaction
-        // In production, you'd need to implement proper signing
-        const simulation = await aptos.transaction.simulate.simple({
-          signerPublicKey: address,
-          transaction,
-        });
+        // Note: In this app, all on-chain transactions go through the backend
+        // which handles signing with the admin account. This hook is kept for
+        // future use cases where client-side signing might be needed.
 
         return {
           success: true,
-          hash: 'simulated',
-          simulation,
+          hash: 'pending-backend-execution',
+          transaction,
         };
       } catch (error) {
         console.error('Transaction error:', error);

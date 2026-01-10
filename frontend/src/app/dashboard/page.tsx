@@ -12,20 +12,23 @@ import { Loader2, ArrowUpRight, ArrowDownLeft, Clock, ExternalLink, XCircle } fr
 
 interface Stream {
   id: string;
-  senderAddress: string;
-  recipientAddress: string;
-  recipientSocialHandle: string | null;
+  onChainId: number;
+  sender: string;
+  recipient: string;
+  recipientSocial: { type: string; handle: string } | null;
   totalAmount: string;
   claimedAmount: string;
+  ratePerSecond: string;
   startTime: string;
   endTime: string;
+  message: string | null;
   status: string;
 }
 
 export default function DashboardPage() {
   const { ready, authenticated, login, getAccessToken, user } = usePrivy();
   const { wallets } = useWallets();
-  const { cancelStream, isLoading: isCancelling } = useStreamActions();
+  const { cancelStream } = useStreamActions();
 
   const [outgoingStreams, setOutgoingStreams] = useState<Stream[]>([]);
   const [incomingStreams, setIncomingStreams] = useState<Stream[]>([]);
@@ -206,11 +209,11 @@ export default function DashboardPage() {
                         {activeTab === 'outgoing' ? 'To' : 'From'}
                       </p>
                       <p className="font-medium text-gray-900">
-                        {stream.recipientSocialHandle ||
+                        {stream.recipientSocial?.handle ||
                           shortenAddress(
                             activeTab === 'outgoing'
-                              ? stream.recipientAddress
-                              : stream.senderAddress
+                              ? stream.recipient
+                              : stream.sender
                           )}
                       </p>
                     </div>
