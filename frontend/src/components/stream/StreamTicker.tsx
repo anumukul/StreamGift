@@ -34,11 +34,14 @@ export function StreamTicker({
 
       const effectiveTime = Math.min(now, end);
       const elapsed = Math.floor((effectiveTime - start) / 1000);
-      const accrued = BigInt(elapsed) * BigInt(ratePerSecond);
-      const remaining = BigInt(totalAmount) - BigInt(claimedAmount);
-      
-      const claimableAmount = accrued > remaining ? remaining : accrued;
-      return claimableAmount.toString();
+      const totalAccrued = BigInt(elapsed) * BigInt(ratePerSecond);
+
+      // Formula: claimable = min(totalAccrued, totalAmount) - claimedAmount
+      // This correctly shows what's available NOW, accounting for previous claims
+      const cappedAccrued = totalAccrued > BigInt(totalAmount) ? BigInt(totalAmount) : totalAccrued;
+      const claimableAmount = cappedAccrued - BigInt(claimedAmount);
+
+      return claimableAmount > 0n ? claimableAmount.toString() : '0';
     };
 
     const updateClaimable = () => {

@@ -231,15 +231,20 @@ router.get('/:id', async (req, res) => {
     }
 
     // Calculate current claimable amount
+    // Formula: claimable = min(totalAccrued, totalAmount) - claimedAmount
     const now = Math.floor(Date.now() / 1000);
     const startTime = Math.floor(stream.startTime.getTime() / 1000);
+    const endTime = Math.floor(stream.endTime.getTime() / 1000);
     let claimable = '0';
 
-    if (now > startTime) {
-      const elapsed = now - startTime;
-      const accrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
-      const totalRemaining = BigInt(stream.totalAmount) - BigInt(stream.claimedAmount);
-      claimable = (accrued > totalRemaining ? totalRemaining : accrued).toString();
+    if (now > startTime && stream.status === 'ACTIVE') {
+      const effectiveTime = Math.min(now, endTime);
+      const elapsed = effectiveTime - startTime;
+      const totalAccrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
+      // Cap at totalAmount, then subtract what's already claimed
+      const cappedAccrued = totalAccrued > BigInt(stream.totalAmount) ? BigInt(stream.totalAmount) : totalAccrued;
+      const claimableAmount = cappedAccrued - BigInt(stream.claimedAmount);
+      claimable = (claimableAmount > 0n ? claimableAmount : 0n).toString();
     }
 
     // Try to get on-chain claimable if available

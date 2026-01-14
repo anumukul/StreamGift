@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js';
 import {
   getClaimableAmount,
+  getClaimableOnChain,
   updateStreamRecipientOnChain,
   claimStreamAsAdmin,
 } from '../services/movementBlockchain.js';
@@ -116,6 +117,32 @@ router.post('/:streamId/prepare', authMiddleware, async (req: AuthenticatedReque
       }
     }
 
+    // Calculate actual claimable amount
+    let claimable = '0';
+    const now = Math.floor(Date.now() / 1000);
+    const startTime = Math.floor(stream.startTime.getTime() / 1000);
+    const endTime = Math.floor(stream.endTime.getTime() / 1000);
+
+    // Try to get from on-chain first
+    if (stream.onChainId > 0) {
+      try {
+        const onChainClaimable = await getClaimableOnChain(stream.onChainId);
+        claimable = onChainClaimable.toString();
+      } catch (e) {
+        // Fall back to local calculation
+      }
+    }
+
+    // Local calculation fallback
+    if (claimable === '0' && now > startTime && stream.status === 'ACTIVE') {
+      const effectiveTime = Math.min(now, endTime);
+      const elapsed = effectiveTime - startTime;
+      const totalAccrued = BigInt(elapsed) * BigInt(stream.ratePerSecond);
+      const cappedAccrued = totalAccrued > BigInt(stream.totalAmount) ? BigInt(stream.totalAmount) : totalAccrued;
+      const claimableAmount = cappedAccrued - BigInt(stream.claimedAmount);
+      claimable = (claimableAmount > 0n ? claimableAmount : 0n).toString();
+    }
+
     // Generate authorization message for the user to sign
     const timestamp = Date.now();
     const authMessage = `Claim stream ${stream.id}\nWallet: ${userWalletAddress}\nTimestamp: ${timestamp}`;
@@ -124,7 +151,7 @@ router.post('/:streamId/prepare', authMiddleware, async (req: AuthenticatedReque
       stream: {
         id: stream.id,
         onChainId: stream.onChainId,
-        claimable: stream.totalAmount,
+        claimable,
         totalAmount: stream.totalAmount,
         claimedAmount: stream.claimedAmount,
       },

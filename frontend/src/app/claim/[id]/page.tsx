@@ -119,9 +119,15 @@ export default function ClaimPage() {
         });
         toast.success(`Successfully claimed ${formatAmount(result.claimedAmount || '0')} MOVE!`);
 
+        // Fetch updated stream data
         const token = await getAccessToken();
         const updatedStream = await api.streams.get(streamId, token || undefined);
         setStream(updatedStream);
+
+        // Reset claim step after a delay so user can claim again
+        setTimeout(() => {
+          setClaimStep('idle');
+        }, 3000);
       } else {
         throw new Error(result.error || 'Failed to claim');
       }
@@ -361,8 +367,10 @@ export default function ClaimPage() {
                         <Loader2 className="h-5 w-5 animate-spin" />
                         <span>Claiming...</span>
                       </>
+                    ) : claimStep === 'success' ? (
+                      'Claim More'
                     ) : (
-                      'Claim Now - Free'
+                      'Claim Available Tokens'
                     )}
                   </button>
                 ) : (
@@ -376,6 +384,12 @@ export default function ClaimPage() {
             {!authenticated && !isComplete && (
               <p className="text-center text-sm text-gray-500 mt-4">
                 Sign in with your email or social account to claim. No gas fees required.
+              </p>
+            )}
+
+            {authenticated && isRecipient && !isComplete && !isCancelled && BigInt(stream.claimedAmount) > 0n && (
+              <p className="text-center text-sm text-gray-500 mt-4">
+                Tokens stream continuously. You can claim multiple times as more tokens become available.
               </p>
             )}
 
